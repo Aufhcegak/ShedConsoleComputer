@@ -302,6 +302,42 @@ AutomationCore.MachineDataProvider = m => m is SimMachine sm ? sm.Data : null;
     ChestUiCore.CompressBack(null!, new Inventory());  // 不崩即可
     Check("ui: null 压缩不崩", true);
     Check("ui: null 放入返回原物", ChestUiCore.PutIntoFixedSlots(null!, new SimItem("395", 1, -27)) != null);
+
+    // ======== 翻倍 bug 回归（本次报告）：同一个物品实例不能同时出现在箱格和手上 ========
+    // 场景模拟：手上 5 颗咖啡豆 → 点背包格放进箱子 → 回调把物品放进箱格。
+    // 翻倍 bug 的机制：回调放完没清空手上的引用，同一实例同时挂在箱格和手上，
+    // 再点一次就自我堆叠翻倍（5→10→20→40）。
+    {
+        // 手上 5 颗豆，箱格空：放进箱子后，手上必须清空（不能再引用同一实例）
+        var hand = new SimItem("433", 5);
+        var c1 = new Inventory();
+        var s1 = ChestUiCore.ExpandToFixedSlots(c1);
+        var leftover1 = ChestUiCore.PutIntoFixedSlots(s1, hand);  // 对应回调放完
+        Check("dup: 放进后无剩余", leftover1 == null);
+        CheckEq("dup: 箱格 0 是那 5 颗豆", s1[0]!.Stack, 5);
+        Check("dup: 放完手上必须无引用", hand.Stack == 5 && !ReferenceEquals(s1[0], hand));
+
+        // 再放一次同数量：应该新增一格（或堆叠），绝不能翻倍
+        var hand2 = new SimItem("433", 5);
+        var s2 = ChestUiCore.ExpandToFixedSlots(c1);
+        // 先放 5 颗
+        ChestUiCore.PutIntoFixedSlots(s2, new SimItem("433", 5));
+        // 再放 5 颗（新实例，模拟玩家点背包另一格）
+        var leftover2 = ChestUiCore.PutIntoFixedSlots(s2, hand2);
+        Check("dup: 两次放入无剩余", leftover2 == null);
+        CheckEq("dup: 堆叠成 10 而非翻倍", s2[0]!.Stack, 10);
+
+        // 拿取方向：从箱子拿 5 颗到手上 → 箱格置空，手上拿到独立引用（原版 leftClick 语义）
+        var s3 = ChestUiCore.ExpandToFixedSlots(new Inventory { new SimItem("433", 5) });
+        var grabbed = ChestUiCore.GrabFromChest(s3, 0);
+        Check("dup: 拿到 5 颗", grabbed != null && grabbed.Stack == 5);
+        Check("dup: 箱格已空", s3[0] == null);
+        // 手上再放回：箱格恢复，手引用清空，不翻倍
+        var leftover3 = ChestUiCore.PutIntoFixedSlots(s3, grabbed!);
+        Check("dup: 放回无剩余", leftover3 == null);
+        CheckEq("dup: 放回 5 颗不翻倍", s3[0]!.Stack, 5);
+        Check("dup: 放回后手引用独立", grabbed!.Stack == 5 && !ReferenceEquals(s3[0], grabbed));
+    }
 }
 
 Console.WriteLine($"\n总计: PASS={pass} FAIL={fails}");

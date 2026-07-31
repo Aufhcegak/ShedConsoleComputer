@@ -55,7 +55,10 @@ namespace ShedConsoleComputer
             return item;
         }
 
-        /// <summary>玩家放东西进箱子：先尝试堆叠到已有同类物品，否则放进第一个空位。返回放不下的剩余（null = 全放进去了）。</summary>
+        /// <summary>玩家放东西进箱子：先尝试堆叠到已有同类物品，否则放进第一个空位。
+        /// 放进空位时放的是 getOne() 副本——绝不能把玩家手上的原实例直接放进箱格，
+        /// 否则同一实例会同时挂在"箱格"和"手上"，下次点击自我堆叠翻倍（5→10→20→40）。
+        /// 返回放不下的剩余（null = 全放进去了）。</summary>
         public static Item? PutIntoFixedSlots(List<Item> fixedItems, Item item)
         {
             if (fixedItems == null || item == null)
@@ -66,28 +69,27 @@ namespace ShedConsoleComputer
             {
                 if (slot == null || slot.canStackWith(item))
                 {
-                    int leftover = slot == null ? 0 : slot.addToStack(item);
-                    if (slot == null && leftover == 0)
-                    {
-                        // 空位直接放
-                        int idx = fixedItems.IndexOf(null);
-                        if (idx >= 0)
-                            fixedItems[idx] = item;
+                    if (slot == null)
+                        break; // 遇到空位：先尝试堆叠后面的同类，最后再落空位
+                    int leftover = slot.addToStack(item);
+                    if (leftover == 0)
                         return null;
-                    }
-                    if (slot != null && leftover == 0)
-                        return null;
-                    if (slot != null)
-                        item.Stack = leftover;
+                    item.Stack = leftover;
                     break;
                 }
             }
-            // 剩余放不进空位就返回
+
+            // 剩余放空位（放副本，保持实例唯一性）
             int empty = fixedItems.IndexOf(null);
             if (empty >= 0)
             {
-                fixedItems[empty] = item;
-                return null;
+                Item? copy = item.getOne();
+                if (copy != null)
+                {
+                    copy.Stack = item.Stack;
+                    fixedItems[empty] = copy;
+                    return null;
+                }
             }
             return item;
         }

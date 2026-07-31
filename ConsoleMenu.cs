@@ -167,21 +167,27 @@ namespace ShedConsoleComputer
             List<Item> fixedItems = ChestUiCore.ExpandToFixedSlots(chest.Items);
 
             // 自定义回调：操作 fixedItems 数组，绝不触发原版 ShowMenu() 重建。
+            // 关键：放完必须清空/更新手上引用（heldItem）——否则同一个物品实例会同时
+            // 出现在箱格和手上，下次点击自我堆叠翻倍（5→10→20→40）。
+            // 原版 Chest.grabItemFromInventory 也是这么做的（heldItem = 剩余）。
+            ItemGrabMenu? grabMenu = null;
             void GrabFromChest(Item item, Farmer who)
             {
                 int idx = fixedItems.IndexOf(item);
                 if (idx >= 0)
                     fixedItems[idx] = null;
             }
-            // 放东西：先进数组，放不下的部分留在手上（ItemGrabMenu 行为与普通箱子一致）。
+            // 放东西：先进数组；放不下的部分留在手上（ItemGrabMenu 行为与普通箱子一致）。
+            // 注意：不能调 who.removeItemFromInventory——原版 InventoryMenu.leftClick 在
+            // 调回调之前已经把物品从背包移除，再调会重复扣除。
             void PutIntoChest(Item item, Farmer who)
             {
                 Item? leftover = ChestUiCore.PutIntoFixedSlots(fixedItems, item);
-                if (leftover == null)
-                    who.removeItemFromInventory(item);
+                if (grabMenu != null)
+                    grabMenu.heldItem = leftover;
             }
 
-            var grabMenu = new ItemGrabMenu(
+            grabMenu = new ItemGrabMenu(
                 inventory: fixedItems,
                 reverseGrab: false,
                 showReceivingMenu: true,
