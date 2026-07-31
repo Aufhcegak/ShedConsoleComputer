@@ -1,0 +1,10 @@
+{
+  "Name": "Shed Console Computer",
+  "Author": "Claude",
+  "Version": "1.3.1",
+  "Description": "一台放在小屋里的主控电脑:统筹整个小屋的小桶,按优先级自动投放作物、自动收取成品,成果集中到一个箱子。",
+  "UniqueID": "Claude.ShedConsoleComputer",
+  "EntryDll": "ShedConsoleComputer.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": []
+}

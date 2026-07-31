@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- SMAPI 4.x 基于 .NET 6 运行时 -->
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>ShedConsoleComputer</AssemblyName>
+    <RootNamespace>ShedConsoleComputer</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 源码直接放在游戏 Mods 目录下，禁用 ModBuildConfig 的"部署到 Mods"步骤，
+         避免把 manifest.json 复制到自身导致文件占用冲突。编译产物由下面的 AfterBuild 目标复制。 -->
+    <EnableModDeploy>false</EnableModDeploy>
+    <EnableModZip>false</EnableModZip>
+  </PropertyGroup>
+
+  <!-- 编译完成后把运行所需文件复制到项目目录本身（即游戏 Mods\ShedConsoleComputer）。 -->
+  <Target Name="DeployModFiles" AfterTargets="Build">
+    <ItemGroup>
+      <ModDeployFiles Include="$(TargetPath)" />
+      <ModDeployFiles Include="$(TargetDir)$(TargetName).pdb" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ModDeployFiles)" DestinationFolder="$(ProjectDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <ItemGroup>
+    <PackageReference Include="Pathoschild.Stardew.ModBuildConfig" Version="4.4.0" />
+    <PackageReference Include="Lib.Harmony" Version="2.2.2" />
+  </ItemGroup>
+
+  <!-- 排除测试工程与任何杂散子工程,避免 .cs/obj/bin 被主项目通配符误编译(导致 AssemblyInfo 重复)。 -->
+  <ItemGroup>
+    <Compile Remove="logic_test/**" />
+    <Compile Remove="assets/**/obj/**" />
+    <Compile Remove="assets/**/bin/**" />
+    <None Remove="logic_test/**" />
+    <Content Remove="logic_test/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Update="0Harmony">
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

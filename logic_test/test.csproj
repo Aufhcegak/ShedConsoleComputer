@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>logic_test</AssemblyName>
+    <RootNamespace>logic_test</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 直接链接主工程源码:这样测试能 mock 出 ConsoleManager/AutomationCore 里用到的原版类型
+         （ConsoleMenu 是 UI、MachinePatches 是 Harmony 运行时、ModEntry 是 SMAPI 入口，
+          都不属于可测逻辑层，排除） -->
+    <Compile Include="..\ConsoleManager.cs" />
+    <Compile Include="..\AutomationCore.cs" />
+    <Compile Include="..\ChestUiCore.cs" />
+    <Compile Include="..\ModConfig.cs" />
+    <Compile Include="..\Perf.cs" />
+    <Compile Include="..\SaveModels.cs" />
+    <!-- 手写引用(Reference 默认 Private=true:复制到输出 + 写进 deps.json,运行时才能解析)。
+         PhoneGift 的 logic_test 就是这么跑通的。 -->
+    <Reference Include="StardewValley"><HintPath>..\..\..\Stardew Valley.dll</HintPath></Reference>
+    <Reference Include="StardewValley.GameData"><HintPath>..\..\..\StardewValley.GameData.dll</HintPath></Reference>
+    <!-- 编译测试 mock(继承原版类型)需要的 MonoGame 程序集 -->
+    <Reference Include="MonoGame.Framework"><HintPath>..\..\..\MonoGame.Framework.dll</HintPath></Reference>
+    <!-- SMAPI 接口(IMonitor/IModHelper stub 用) + Harmony(MachinePatches 编译用) -->
+    <Reference Include="StardewModdingAPI"><HintPath>..\..\..\StardewModdingAPI.dll</HintPath></Reference>
+    <Reference Include="0Harmony"><HintPath>..\..\..\smapi-internal\0Harmony.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>
