@@ -32,6 +32,31 @@ Farmer? who = null;
 // 注入机器数据源：AutomationCore 参数类型是 Object，虚调用不会命中 SimMachine 的
 // new 隐藏方法，所以必须走可替换的数据源（游戏里默认原版 content 管线）。
 AutomationCore.MachineDataProvider = m => m is SimMachine sm ? sm.Data : null;
+// 注入"放入成果箱"模拟实现（默认走原版 Utility，测试环境无 Game1 会原生崩溃）。
+// 复刻原版 addItemToThisInventoryList 的语义：先堆叠同类、再找空位（36 格）、放不下返回剩余。
+// 注意 addToStack 是"加法语义"（把 held 整个加进 slot，溢出返回剩余量），
+// 剩余量要从 held 里扣掉（ConsumeStack），否则 held.Stack 会虚高。
+AutomationCore.CollectPutDelegate = (held, output) =>
+{
+    // 先堆叠同类
+    foreach (Item slot in output)
+    {
+        if (slot.canStackWith(held))
+        {
+            int leftover = slot.addToStack(held);
+            if (leftover == 0)
+                return null;
+            held.ConsumeStack(held.Stack - leftover); // 扣掉已堆叠的部分，剩 leftover
+            break;
+        }
+    }
+    if (output.Count < 36)
+    {
+        output.Add(held);
+        return null;
+    }
+    return held;
+};
 
 // ============================================================
 // 第一组：机器判定 CanMachineAccept —— 每种机器吃什么、不吃什么
@@ -338,6 +363,161 @@ AutomationCore.MachineDataProvider = m => m is SimMachine sm ? sm.Data : null;
         CheckEq("dup: 放回 5 颗不翻倍", s3[0]!.Stack, 5);
         Check("dup: 放回后手引用独立", grabbed!.Stack == 5 && !ReferenceEquals(s3[0], grabbed));
     }
+}
+
+// ============================================================
+// 第八组：负类物品误投检查 —— 常见"不能投"的类别放进投料箱
+// ============================================================
+{
+    SimMachine keg = new("12", MachineSpec.Keg());
+    var chest = new Inventory { new SimItem("434", 1, -27) }; // 蛋黄酱(饮品-27)
+    Check("reject: 蛋黄酱不投", !AutomationCore.TryFeedMachine(keg, chest, state, who));
+    var chest2 = new Inventory { new SimItem("340", 1, -81) }; // 蜂蜜(原料-81)
+    // 蜂蜜在白名单里（小桶酿蜂蜜酒，正确行为）→ 能投、按 1:1 消耗
+    Check("accept: 蜂蜜(340)能投(蜂蜜酒)", AutomationCore.TryFeedMachine(keg, chest2, state, who));
+    CheckEq("accept: 蜂蜜投掉", chest2.Count, 0);
+    var chest3 = new Inventory { new SimItem("188", 1, -20) }; // 鱼
+    Check("reject: 鱼不投", !AutomationCore.TryFeedMachine(keg, chest3, state, who));
+    var chest4 = new Inventory { new SimItem("176", 1, -6) };  // 蛋
+    Check("reject: 蛋不投", !AutomationCore.TryFeedMachine(keg, chest4, state, who));
+    var chest5 = new Inventory { new SimItem("184", 1, -18) }; // 牛奶
+    Check("reject: 牛奶不投", !AutomationCore.TryFeedMachine(keg, chest5, state, who));
+    // 混杂：鱼+水果 → 跳过鱼投水果
+    SimMachine keg6 = new("12", MachineSpec.Keg());
+    var chest6 = new Inventory { new SimItem("188", 1, -20), new SimItem("348", 1, -79) };
+    Check("reject: 鱼+水果跳过鱼", AutomationCore.TryFeedMachine(keg6, chest6, state, who));
+}
+
+// ============================================================
+// 第九组：数量预检 HasEnoughCountForRule —— 直接测 internal 方法
+// ============================================================
+{
+    SimMachine keg = new("12", MachineSpec.Keg());
+    // 5 颗咖啡豆 → 够
+    Check("count: 5 颗够", AutomationCore.HasEnoughCountForRule(keg, new SimItem("433", 5), who));
+    // 4 颗 → 不够
+    Check("count: 4 颗不够", !AutomationCore.HasEnoughCountForRule(keg, new SimItem("433", 4), who));
+    // 1 颗 → 不够
+    Check("count: 1 颗不够", !AutomationCore.HasEnoughCountForRule(keg, new SimItem("433", 1), who));
+    // 普通水果 1 个 → 够（RequiredCount=1）
+    Check("count: 水果 1 个够", AutomationCore.HasEnoughCountForRule(keg, new SimItem("348", 1, -79), who));
+    // 机器数据缺失 → 不够（安全方向）
+    SimMachine kegNull = new("12", null);
+    Check("count: 数据缺失不够", !AutomationCore.HasEnoughCountForRule(kegNull, new SimItem("433", 5), who));
+    // 蜂蜜：匹配 Default 规则（1 换 1）→ 数量够（模拟器 Default 规则无过滤，真实游戏由规则过滤）
+    Check("count: 蜂蜜数量够", AutomationCore.HasEnoughCountForRule(keg, new SimItem("340", 1, -81), who));
+}
+
+// ============================================================
+// 第十组：收成品部分收取 —— 成果箱同类堆叠接近满时
+// ============================================================
+{
+    // 成果箱已有 34 个啤酒(459, 可堆叠999)：收 1 个没问题
+    SimMachine keg = new("12", MachineSpec.Keg());
+    keg.heldObject.Value = new SimItem("459", 1);
+    keg.readyForHarvest.Value = true;
+    keg.MinutesUntilReady = 0;
+    var output = new Inventory { new SimItem("459", 34) };
+    Check("partial: 空位够能收", AutomationCore.TryCollectFromMachine(keg, output));
+    CheckEq("partial: 堆叠成 35", output[0]!.Stack, 35);
+
+    // 成果箱同类堆叠 999 满但还有空位：剩余放新格，全部收走（与原版 addItemToThisInventoryList 一致）
+    SimMachine keg2 = new("12", MachineSpec.Keg());
+    keg2.heldObject.Value = new SimItem("459", 1);
+    keg2.readyForHarvest.Value = true;
+    keg2.MinutesUntilReady = 0;
+    var output2 = new Inventory { new SimItem("459", 999) };
+    Check("partial: 堆叠满有空位仍收走", AutomationCore.TryCollectFromMachine(keg2, output2));
+    Check("partial: 剩余进新格", output2.Count == 2 && output2[1]!.Stack == 1);
+
+    // 产物大堆叠 50 个 + 成果箱 36 格全满（同类已 990）：部分收走补满 999，剩 41 留在机器
+    SimMachine keg3 = new("12", MachineSpec.Keg());
+    keg3.heldObject.Value = new SimItem("459", 50);
+    keg3.readyForHarvest.Value = true;
+    keg3.MinutesUntilReady = 0;
+    var output3 = new Inventory();
+    for (int i = 0; i < 36; i++)
+        output3.Add(new SimItem("459", 990));
+    Check("partial: 满箱部分收取", !AutomationCore.TryCollectFromMachine(keg3, output3));
+    CheckEq("partial: 成果箱补满 999", output3[0]!.Stack, 999);
+    CheckEq("partial: 机器剩 41", keg3.heldObject.Value!.Stack, 41);
+    Check("partial: 机器仍待收", keg3.readyForHarvest.Value);
+}
+
+// ============================================================
+// 第十一组：端到端循环 —— 木桶（酒→陈酿）、咖啡豆（5 换 1）
+// ============================================================
+{
+    // 木桶：酒 1 换 1 陈酿 → 收 → 再投
+    SimMachine cask = new("163", MachineSpec.Cask());
+    var chest = new Inventory { new SimItem("348", 2, -26) };
+    var output = new Inventory();
+    Check("e2e-cask: 投酒", AutomationCore.TryFeedMachine(cask, chest, state, who));
+    CheckEq("e2e-cask: 剩 1 瓶", chest[0]!.Stack, 1);
+    Check("e2e-cask: 工作中不投", !AutomationCore.TryFeedMachine(cask, chest, state, who));
+    cask.TickFinish();
+    Check("e2e-cask: 完成能收", AutomationCore.TryCollectFromMachine(cask, output));
+    CheckEq("e2e-cask: 成果进箱", output.Count, 1);
+    Check("e2e-cask: 空机再投", AutomationCore.TryFeedMachine(cask, chest, state, who));
+    CheckEq("e2e-cask: 酒投完", chest.Count, 0);
+
+    // 咖啡豆完整循环：6 颗 → 投 5 剩 1 → 完成收咖啡 → 剩 1 颗不够不投
+    SimMachine keg = new("12", MachineSpec.Keg());
+    var chest2 = new Inventory { new SimItem("433", 6) };
+    var output2 = new Inventory();
+    Check("e2e-coffee: 投 5 颗", AutomationCore.TryFeedMachine(keg, chest2, state, who));
+    CheckEq("e2e-coffee: 剩 1 颗", chest2[0]!.Stack, 1);
+    Check("e2e-coffee: 1 颗不够不投", !AutomationCore.TryFeedMachine(keg, chest2, state, who));
+    keg.TickFinish();
+    Check("e2e-coffee: 收咖啡", AutomationCore.TryCollectFromMachine(keg, output2));
+    Check("e2e-coffee: 产出是咖啡", output2[0]!.QualifiedItemId == "(O)395");
+    Check("e2e-coffee: 剩 1 颗仍不投", !AutomationCore.TryFeedMachine(keg, chest2, state, who));
+}
+
+// ============================================================
+// 第十二组：箱子 UI 异常物品 —— getOne null / 不可堆叠 / 超长列表
+// ============================================================
+{
+    // 注意：原版 Object.getOne() 非虚且语义保证不返回 null（真实游戏物品不可能坏）。
+    // 防御性 null 检查已在 ChestUiCore 里（copy != null），这里测不可堆叠物品的副本行为。
+    var slots2 = ChestUiCore.ExpandToFixedSlots(new Inventory());
+    var chair = new SimNonStackable("424");
+    Check("weird: 不可堆叠能放", ChestUiCore.PutIntoFixedSlots(slots2, chair) == null);
+    Check("weird: 放的是副本", !ReferenceEquals(slots2[0], chair));
+    // 同类不可堆叠第二次 → 新格子（不能堆叠）
+    Check("weird: 不可堆叠占新格", ChestUiCore.PutIntoFixedSlots(slots2, new SimNonStackable("424")) == null);
+    CheckEq("weird: 两个占两格", ChestUiCore.CountItems(slots2), 2);
+
+    // 超长列表（>36 项）：展开截断到 36
+    var longList = new Inventory();
+    for (int i = 0; i < 40; i++)
+        longList.Add(new SimItem("348", 1, -79));
+    var slots3 = ChestUiCore.ExpandToFixedSlots(longList);
+    CheckEq("weird: 超长截断 36", ChestUiCore.CountItems(slots3), 36);
+
+    // null 输入：Expand null 不崩
+    Check("weird: null 展开不崩", ChestUiCore.CountItems(ChestUiCore.ExpandToFixedSlots(null!)) == 0);
+}
+
+// ============================================================
+// 第十三组：投料失败还原 —— 候选顺序还原 / 兜底路径 autoLoadFrom
+// ============================================================
+{
+    // 候选在箱子中间、投料失败（机器满）→ 箱子顺序还原
+    SimMachine keg = new("12", MachineSpec.Keg());
+    keg.heldObject.Value = new SimItem("459", 1); // 机器满
+    var chest = new Inventory { new SimItem("348", 1, -79), new SimItem("264", 1, -75), new SimItem("262", 1) };
+    Check("restore: 满机不投", !AutomationCore.TryFeedMachine(keg, chest, state, who));
+    Check("restore: 箱子顺序还原", chest[0]!.QualifiedItemId == "(O)348" && chest[1]!.QualifiedItemId == "(O)264" && chest[2]!.QualifiedItemId == "(O)262");
+
+    // 候选成功投料：顺序不还原（投的就是候选，顺序变更无影响）
+    SimMachine keg2 = new("12", MachineSpec.Keg());
+    var chest2 = new Inventory { new SimItem("348", 1, -79), new SimItem("433", 5) };
+    var st2 = new ConsoleState();
+    st2.InputPriority.Add("(O)433");
+    Check("restore: 优先投豆成功", AutomationCore.TryFeedMachine(keg2, chest2, st2, who));
+    // 豆被投光后压缩：剩水果
+    Check("restore: 成功后顺序正常", chest2.Count == 1 && chest2[0]!.Stack == 1);
 }
 
 Console.WriteLine($"\n总计: PASS={pass} FAIL={fails}");

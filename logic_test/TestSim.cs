@@ -144,12 +144,16 @@ public class SimMachine : Object
         return true;
     }
 
-    /// <summary>模拟机器倒计时归零：readyForHarvest 置位（会触发 mod 的补丁）。</summary>
+    /// <summary>模拟机器倒计时归零：readyForHarvest 置位（会触发 mod 的补丁）。
+    /// 注意：原版投料时 OutputMachine 会设置 lastOutputRuleId（OutputCollected 规则匹配用），
+    /// 模拟器在这里也设置，否则收集路径的规则匹配会失败。</summary>
     public void TickFinish()
     {
         MinutesUntilReady = 0;
         readyForHarvest.Value = true;
         FinishedCount++;
+        if (lastOutputRuleId.Value == null)
+            lastOutputRuleId.Value = Data?.OutputRules?.FirstOrDefault()?.Id;
         minutesElapsed(0);
     }
 
@@ -195,6 +199,30 @@ public class SimTool : Item
     public override string getDescription() => "";
     public override bool isPlaceable() => false;
     protected override Item GetOneNew() => new SimTool();
+}
+
+/// <summary>getOne() 返回 null 的物品（模拟损坏的物品数据）。</summary>
+public class SimBrokenOne : Object
+{
+    public SimBrokenOne(string unqualifiedId, int stack)
+    {
+        this.ItemId = unqualifiedId;
+        this.Stack = stack;
+    }
+    public override int maximumStackSize() => 999;
+    protected override Item? GetOneNew() => null;
+}
+
+/// <summary>不可堆叠的物品（模拟家具/工具类）。</summary>
+public class SimNonStackable : Object
+{
+    public SimNonStackable(string unqualifiedId, int stack = 1)
+    {
+        this.ItemId = unqualifiedId;
+        this.Stack = stack;
+    }
+    public override int maximumStackSize() => 1;
+    protected override Item GetOneNew() => new SimNonStackable(this.ItemId, 1);
 }
 
 // ============================================================

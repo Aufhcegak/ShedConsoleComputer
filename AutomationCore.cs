@@ -1,11 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using StardewValley;
 using StardewValley.GameData.Machines;
 using StardewValley.Inventories;
 using StardewValley.Objects;
 using Object = StardewValley.Object;
+
+// 让 logic_test 测试工程能访问 internal 方法（数量预检等）
+[assembly: InternalsVisibleTo("logic_test")]
 
 namespace ShedConsoleComputer
 {
@@ -50,9 +54,9 @@ namespace ShedConsoleComputer
                 return false;
             return machine.ItemId switch
             {
-                "12" => // 小桶：水果 / 蔬菜 / 啤酒花 / 小麦 / 咖啡豆 / 茶叶（含 1.5+ 的绿茶茶叶 815）
+                "12" => // 小桶：水果 / 蔬菜 / 啤酒花 / 小麦 / 咖啡豆 / 茶叶 / 蜂蜜
                     obj.Category == -79 || obj.Category == -75
-                    || obj.QualifiedItemId is "(O)304" or "(O)433" or "(O)262" or "(O)815",
+                    || obj.QualifiedItemId is "(O)304" or "(O)433" or "(O)262" or "(O)815" or "(O)340",
                 "163" => // 木桶：酒
                     obj.Category == -26,
                 "15" => // 罐头瓶：水果 / 蔬菜
@@ -77,6 +81,16 @@ namespace ShedConsoleComputer
             {
                 return null; // 数据异常按"无规则"处理，安全方向
             }
+        }
+
+        /// <summary>收成品时的"放入成果箱"策略。默认走原版 Utility.addItemToThisInventoryList
+        /// （游戏里行为与原版完全一致）；测试里注入模拟实现（纯逻辑，避免原版方法在无游戏
+        /// 环境下原生崩溃）。返回放不下的剩余（null = 全放进去了）。</summary>
+        public static Func<Object, Inventory, Item?> CollectPutDelegate = DefaultCollectPut;
+
+        private static Item? DefaultCollectPut(Object held, Inventory output)
+        {
+            return Utility.addItemToThisInventoryList(held, output, 36);
         }
 
         /*********
@@ -125,6 +139,9 @@ namespace ShedConsoleComputer
             return loaded;
 
             // 复刻原版 AttemptAutoLoad(IInventory) 的遍历语义（非 IInventory 兜底）。
+            // 注意：autoLoadFrom 是 Object 的静态字段（跨机器共享），绝不能在这里设置——
+            // 会污染其他机器的投料状态。真实游戏永远走 IInventory 路径（AttemptAutoLoad
+            // 内部自己管理 autoLoadFrom），此兜底只服务测试/极端情况。
             static bool TryFeedByLoop(Object m, IList<Item> items, Farmer? w)
             {
                 foreach (Item item in items)
@@ -251,7 +268,7 @@ namespace ShedConsoleComputer
             if (held == null || !machine.readyForHarvest.Value || machine.MinutesUntilReady > 0)
                 return false;
 
-            Item leftover = Utility.addItemToThisInventoryList(held, output, 36);
+            Item leftover = CollectPutDelegate(held, output);
             if (leftover == null)
             {
                 machine.heldObject.Value = null;
