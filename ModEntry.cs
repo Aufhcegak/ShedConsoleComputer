@@ -36,6 +36,7 @@ namespace ShedConsoleComputer
             helper.Events.GameLoop.Saving += OnSaving;
             helper.Events.GameLoop.DayStarted += OnDayStarted;
             helper.Events.GameLoop.ReturnedToTitle += OnReturnedToTitle;
+            helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
             helper.Events.GameLoop.OneSecondUpdateTicked += OnOneSecondUpdateTicked;
             helper.Events.World.ObjectListChanged += OnObjectListChanged;
             helper.Events.Input.ButtonPressed += OnButtonPressed;
@@ -61,6 +62,12 @@ namespace ShedConsoleComputer
         private void OnOneSecondUpdateTicked(object? sender, OneSecondUpdateTickedEventArgs e)
         {
             Manager!.RunAutomationForAll();
+        }
+
+        /// <summary>主线程每 tick：处理冻结期内标记的待处理机器（避开 passTimeForObjects 的 Lock）。</summary>
+        private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
+        {
+            Manager!.ProcessPendingMachines();
         }
 
         private void OnObjectListChanged(object? sender, ObjectListChangedEventArgs e)

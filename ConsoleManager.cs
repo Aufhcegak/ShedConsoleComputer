@@ -239,6 +239,33 @@ namespace ShedConsoleComputer
 
         /// <summary>酒一好立刻收：每次机器状态变化（minutesElapsed）都会调这里，
         /// 命中一台就只处理这一台，然后整栋小屋的机器排队到下一秒扫描——既即时又不卡。</summary>
+        /// <summary>机器状态变化时的待处理队列（冻结期内只标记，主线程 UpdateTicked 统一处理）。</summary>
+        private readonly List<(GameLocation Loc, Object Machine)> PendingMachines = new();
+
+        /// <summary>冻结期（passTimeForObjects 的 objects.Lock()）内只标记机器待处理，不做实际收/投。</summary>
+        public void QueueMachine(GameLocation loc, Object machine)
+        {
+            PendingMachines.Add((loc, machine));
+        }
+
+        /// <summary>主线程（冻结期外）处理队列里的机器：有成品收、有空位投。
+        /// 每 tick 最多处理 8 台，积压的留到下 tick，避免一帧内集中爆发卡顿。</summary>
+        public void ProcessPendingMachines()
+        {
+            if (PendingMachines.Count == 0)
+                return;
+            if (!Context.IsWorldReady || !Context.IsMainPlayer || Game1.activeClickableMenu != null)
+                return;
+
+            int limit = Math.Min(PendingMachines.Count, 8);
+            for (int i = 0; i < limit; i++)
+            {
+                (GameLocation loc, Object machine) = PendingMachines[i];
+                ProcessMachineNow(loc, machine);
+            }
+            PendingMachines.RemoveRange(0, limit);
+        }
+
         public void ProcessMachineNow(GameLocation loc, Object machine)
         {
             if (!Context.IsMainPlayer || loc == null || machine == null)
