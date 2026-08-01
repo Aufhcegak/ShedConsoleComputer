@@ -249,15 +249,18 @@ namespace ShedConsoleComputer
         }
 
         /// <summary>主线程（冻结期外）处理队列里的机器：有成品收、有空位投。
-        /// 每 tick 最多处理 8 台，积压的留到下 tick，避免一帧内集中爆发卡顿。</summary>
+        /// <b>功能优先</b>：每 tick 处理 25 台，100 台同时 ready 也只需 4 tick（≈67ms）收完，
+        /// 用户察觉不到延迟；同时单帧开销封顶，不会叠加成卡顿尖峰。
+        /// 冻结期标记 + 主线程处理 = 既即时又不踩 objects.Lock()。
+        /// 菜单打开时不跳过——否则玩家开着背包时酒好了永远不收，队列无限积压。</summary>
         public void ProcessPendingMachines()
         {
             if (PendingMachines.Count == 0)
                 return;
-            if (!Context.IsWorldReady || !Context.IsMainPlayer || Game1.activeClickableMenu != null)
+            if (!Context.IsWorldReady || !Context.IsMainPlayer)
                 return;
 
-            int limit = Math.Min(PendingMachines.Count, 8);
+            int limit = Math.Min(PendingMachines.Count, 25);
             for (int i = 0; i < limit; i++)
             {
                 (GameLocation loc, Object machine) = PendingMachines[i];
