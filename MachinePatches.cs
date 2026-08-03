@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using HarmonyLib;
 using StardewModdingAPI;
 using StardewValley;
@@ -6,9 +7,13 @@ using Object = StardewValley.Object;
 namespace ShedConsoleComputer
 {
     /// <summary>
-    /// 机器状态每变一次（倒计时、投料、收料都会触发）就检查一次：
-    /// 有成品立刻收进成果箱、有空位立刻投下一份原料，不用等每秒扫描。
-    /// 这就是"酒好了马上自动收"的来源。
+    /// 机器状态每变一次（倒计时、投料、收料都会触发）就标记一次：
+    /// 把机器加入待处理队列，由主线程 UpdateTicked 在冻结期外统一处理（收成品/投原料）。
+    ///
+    /// <b>关键</b>：minutesElapsed / performObjectDropInAction 跑在 passTimeForObjects 的
+    /// objects.Lock() 冻结期内，直接写对象表（收/投）会排队到 Unlock 集中爆发——这就是
+    /// 与 BidirectionalHopper 等机器 mod 共存时每 10 分钟切换卡顿的来源。
+    /// 冻结期内只做标记（不写对象表），处理挪到主线程，卡顿消除。
     /// </summary>
     [HarmonyPatch(typeof(Object), nameof(Object.minutesElapsed))]
     internal static class MachineMinutesPatch
@@ -24,6 +29,10 @@ namespace ShedConsoleComputer
             if (!__instance.bigCraftable.Value || __instance is StardewValley.Objects.Chest)
                 return;
 
+            // 联机:只主机排队处理(访客的机器由主机同步状态,访客本地不跑自动化)
+            if (!Context.IsMainPlayer)
+                return;
+
             GameLocation? location = __instance.Location;
             if (location == null || !mod.Manager.HasConsole(location))
                 return;
@@ -31,12 +40,13 @@ namespace ShedConsoleComputer
             bool ready = __instance.readyForHarvest.Value && __instance.heldObject.Value != null && __instance.MinutesUntilReady <= 0;
             bool emptyIdle = __instance.heldObject.Value == null && !__instance.readyForHarvest.Value;
             if (ready || emptyIdle)
-                mod.Manager.ProcessMachineNow(location, __instance);
+                mod.Manager.QueueMachine(location, __instance); // 冻结期内只标记，不处理
         }
     }
 
     /// <summary>
     /// 玩家手动往机器里放原料后：让电脑立刻看到这个空位变化（主要给其他机器腾优先级）。
+    /// 同冻结期安全策略：只标记，主线程处理。
     /// </summary>
     [HarmonyPatch(typeof(Object), nameof(Object.performObjectDropInAction))]
     internal static class MachineDropInPatch
@@ -50,9 +60,13 @@ namespace ShedConsoleComputer
             if (!__instance.bigCraftable.Value || __instance is StardewValley.Objects.Chest)
                 return;
 
+            // 联机:只主机排队处理
+            if (!Context.IsMainPlayer)
+                return;
+
             GameLocation? location = __instance.Location;
             if (location != null && mod.Manager.HasConsole(location))
-                mod.Manager.ProcessMachineNow(location, __instance);
+                mod.Manager.QueueMachine(location, __instance); // 只标记，主线程处理
         }
     }
 
@@ -89,6 +103,10 @@ namespace ShedConsoleComputer
                 return;
 
             if (!__instance.bigCraftable.Value || __instance is StardewValley.Objects.Chest)
+                return;
+
+            // 联机:只有主机记录手动收酒冷却(访客收酒由主机状态同步,冷却只对主机自动化有意义)
+            if (!Context.IsMainPlayer)
                 return;
 
             // 整堆被拿走（heldObject 清空）才算手动收走；
