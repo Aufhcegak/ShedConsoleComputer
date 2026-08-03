@@ -113,7 +113,12 @@ namespace ShedConsoleComputer
                 foreach (KeyValuePair<Vector2, Object> pair in loc.Objects.Pairs)
                 {
                     if (IsConsole(pair.Value))
+                    {
                         AddToCache(loc, pair.Key);
+                        // 读档恢复:从电脑大件 modData 读回内置箱内容(modData 随存档持久化,
+                        // 是内置箱的权威存储)。旧版 "{}" 空快照 → 防御性当空列表处理。
+                        ApplyFromModData(loc, pair.Key);
+                    }
                 }
                 return true;
             });
@@ -183,6 +188,14 @@ namespace ShedConsoleComputer
         /// <summary>modData key(存两个箱子的 JSON)。</summary>
         private const string SyncKey = "xiepe.ShedConsole.Sync";
 
+        /// <summary>箱子快照的 JSON 序列化配置。
+        /// ⚠️ 关键:System.Text.Json 默认只序列化属性不序列化字段 —— SyncSnapshot 若用字段,
+        /// 序列化输出永远是 "{}",存档后水果全丢(实测根因!)。必须 IncludeFields 或改属性。</summary>
+        private static readonly System.Text.Json.JsonSerializerOptions SnapJson = new()
+        {
+            IncludeFields = true
+        };
+
         /// <summary>物品的轻量序列化(只够还原:ID/堆叠/星级/名称)。</summary>
         private class SyncItem
         {
@@ -215,7 +228,7 @@ namespace ShedConsoleComputer
             };
             if (States.TryGetValue(StateKey(loc, tile), out var state))
                 snap.Priority = state.InputPriority;
-            consoleObj.modData[SyncKey] = System.Text.Json.JsonSerializer.Serialize(snap);
+            consoleObj.modData[SyncKey] = System.Text.Json.JsonSerializer.Serialize(snap, SnapJson);
         }
 
         /// <summary>从电脑大件 modData 读回箱子内容(访客侧应用主机同步来的状态)。
@@ -227,28 +240,35 @@ namespace ShedConsoleComputer
             if (!consoleObj.modData.TryGetValue(SyncKey, out var json))
                 return;
             SyncSnapshot? snap;
-            try { snap = System.Text.Json.JsonSerializer.Deserialize<SyncSnapshot>(json); }
+            try { snap = System.Text.Json.JsonSerializer.Deserialize<SyncSnapshot>(json, SnapJson); }
             catch { return; }
             if (snap == null) return;
 
             var chests = GetInternal(loc, tile);
+            // 防御:JSON 里字段为 null(旧版本 "{}" 存档)→ 当空列表处理,绝不抛异常/丢已加载内容
             chests.fruit.Items.Clear();
-            foreach (var s in snap.Fruit)
+            if (snap.Fruit != null)
             {
-                var item = ItemRegistry.Create(s.Id, s.Stack);
-                if (item == null) continue;
-                item.Quality = s.Quality;
-                if (item.Name != s.Name && !string.IsNullOrEmpty(s.Name)) item.Name = s.Name;
-                chests.fruit.Items.Add(item);
+                foreach (var s in snap.Fruit)
+                {
+                    var item = ItemRegistry.Create(s.Id, s.Stack);
+                    if (item == null) continue;
+                    item.Quality = s.Quality;
+                    if (item.Name != s.Name && !string.IsNullOrEmpty(s.Name)) item.Name = s.Name;
+                    chests.fruit.Items.Add(item);
+                }
             }
             chests.wine.Items.Clear();
-            foreach (var s in snap.Wine)
+            if (snap.Wine != null)
             {
-                var item = ItemRegistry.Create(s.Id, s.Stack);
-                if (item == null) continue;
-                item.Quality = s.Quality;
-                if (item.Name != s.Name && !string.IsNullOrEmpty(s.Name)) item.Name = s.Name;
-                chests.wine.Items.Add(item);
+                foreach (var s in snap.Wine)
+                {
+                    var item = ItemRegistry.Create(s.Id, s.Stack);
+                    if (item == null) continue;
+                    item.Quality = s.Quality;
+                    if (item.Name != s.Name && !string.IsNullOrEmpty(s.Name)) item.Name = s.Name;
+                    chests.wine.Items.Add(item);
+                }
             }
             var state = GetState(loc, tile);
             state.InputPriority.Clear();
