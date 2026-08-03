@@ -5,6 +5,7 @@ using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
 using StardewValley.GameData.BigCraftables;
+using StardewValley.Objects;
 using Object = StardewValley.Object;
 using SObject = StardewValley.Object;
 
@@ -21,6 +22,30 @@ namespace ShedConsoleComputer
         internal ConsoleManager? Manager;
         internal ModConfig? Config;
 
+        /// <summary>联机消息类型。</summary>
+        private const string MsgGuestOp = "sc_guest_op";
+        private const string MsgHostState = "sc_host_state";
+
+        private class GuestOpPayload
+        {
+            public string Loc = "";
+            public float TileX;
+            public float TileY;
+            public string Op = "";       // "put_fruit" / "take_fruit" / "put_wine" / "take_wine" / "set_priority"
+            public string ItemId = "";
+            public int Stack;
+            public int Quality;
+            public List<string>? Priority;
+        }
+
+        private class HostStatePayload
+        {
+            public string Loc = "";
+            public float TileX;
+            public float TileY;
+            public string Json = "";
+        }
+
         public override void Entry(IModHelper helper)
         {
             Instance = this;
@@ -36,19 +61,232 @@ namespace ShedConsoleComputer
             helper.Events.GameLoop.Saving += OnSaving;
             helper.Events.GameLoop.DayStarted += OnDayStarted;
             helper.Events.GameLoop.ReturnedToTitle += OnReturnedToTitle;
+            helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
             helper.Events.GameLoop.OneSecondUpdateTicked += OnOneSecondUpdateTicked;
             helper.Events.World.ObjectListChanged += OnObjectListChanged;
             helper.Events.Input.ButtonPressed += OnButtonPressed;
+            helper.Events.Multiplayer.ModMessageReceived += OnModMessageReceived;
+            helper.Events.Player.Warped += OnWarped;
+        }
+
+        /// <summary>访客操作转发 / 主机状态回传。</summary>
+        private void OnModMessageReceived(object? sender, StardewModdingAPI.Events.ModMessageReceivedEventArgs e)
+        {
+            if (e.FromModID != ModManifest.UniqueID) return;
+            if (Manager == null || !Context.IsWorldReady) return;
+            try
+            {
+                switch (e.Type)
+                {
+                    case MsgGuestOp:
+                        if (Context.IsMainPlayer)
+                            HandleGuestOp(e.ReadAs<GuestOpPayload>(), e.FromPlayerID);
+                        break;
+                    case MsgHostState:
+                        if (!Context.IsMainPlayer)
+                            ApplyHostState(e.ReadAs<HostStatePayload>());
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[sc_sync] 联机消息处理失败: {ex}", LogLevel.Error);
+            }
+        }
+
+        /// <summary>主机执行访客操作(访客已扣钱/已拿到物品,主机改内置箱 + 落盘 modData 同步)。</summary>
+        private void HandleGuestOp(GuestOpPayload payload, long fromPlayerId)
+        {
+            var loc = Game1.getLocationFromName(payload.Loc);
+            if (loc == null) return;
+            var tile = new Vector2(payload.TileX, payload.TileY);
+            if (!Manager.HasConsole(loc)) return;
+
+            var input = Manager.GetInputChestObj(loc, tile);
+            var output = Manager.GetOutputChestObj(loc, tile);
+            switch (payload.Op)
+            {
+                case "request_state":
+                    // 访客打开菜单:把当前状态回给他(不修改任何东西)
+                    SendHostState(loc, tile, new[] { fromPlayerId });
+                    return;
+                case "put_fruit":
+                {
+                    var item = ItemRegistry.Create(payload.ItemId, payload.Stack);
+                    if (item != null)
+                    {
+                        item.Quality = payload.Quality;
+                        input.Items.Add(item);
+                    }
+                    break;
+                }
+                case "take_fruit":
+                    RemoveStack(input, payload.ItemId, payload.Stack);
+                    break;
+                case "put_wine":
+                {
+                    var item = ItemRegistry.Create(payload.ItemId, payload.Stack);
+                    if (item != null)
+                    {
+                        item.Quality = payload.Quality;
+                        output.Items.Add(item);
+                    }
+                    break;
+                }
+                case "take_wine":
+                    RemoveStack(output, payload.ItemId, payload.Stack);
+                    break;
+                case "set_priority":
+                {
+                    var state = Manager.GetState(loc, tile);
+                    state.InputPriority.Clear();
+                    if (payload.Priority != null)
+                        state.InputPriority.AddRange(payload.Priority);
+                    break;
+                }
+            }
+            // 落盘 modData(NetField 同步给访客 + 随存档保存)
+            Manager.PersistToModData(loc, tile);
+            // 把最新状态回给操作者
+            SendHostState(loc, tile, new[] { fromPlayerId });
+            Monitor.Log($"[sc_sync] 主机已执行访客操作 {payload.Op} ({payload.ItemId} x{payload.Stack})", LogLevel.Info);
+        }
+
+        /// <summary>从箱子按 ID+数量扣减(先扣先得)。</summary>
+        private static void RemoveStack(Chest chest, string id, int stack)
+        {
+            int remaining = stack;
+            for (int i = chest.Items.Count - 1; i >= 0 && remaining > 0; i--)
+            {
+                if (chest.Items[i] == null || chest.Items[i].QualifiedItemId != id) continue;
+                int take = Math.Min(remaining, chest.Items[i].Stack);
+                chest.Items[i].Stack -= take;
+                remaining -= take;
+                if (chest.Items[i].Stack <= 0) chest.Items.RemoveAt(i);
+            }
+        }
+
+        /// <summary>主机把指定电脑的箱子状态序列化发给指定访客(菜单打开时同步用)。</summary>
+        private void SendHostState(GameLocation loc, Vector2 tile, long[]? playerIds = null)
+        {
+            if (!Context.IsMainPlayer || Manager == null) return;
+            var input = Manager.GetInputChestObj(loc, tile);
+            var output = Manager.GetOutputChestObj(loc, tile);
+            var state = Manager.GetState(loc, tile);
+            var snap = new ConsoleManager.SyncSnapshotPublic(input, output, state.InputPriority);
+            Helper.Multiplayer.SendMessage(
+                new HostStatePayload
+                {
+                    Loc = loc.NameOrUniqueName,
+                    TileX = tile.X,
+                    TileY = tile.Y,
+                    Json = System.Text.Json.JsonSerializer.Serialize(snap)
+                },
+                MsgHostState,
+                modIDs: new[] { ModManifest.UniqueID },
+                playerIDs: playerIds);
+        }
+
+        /// <summary>访客应用主机状态到本地缓存(打开菜单时用)。</summary>
+        private void ApplyHostState(HostStatePayload payload)
+        {
+            if (Manager == null) return;
+            var loc = Game1.getLocationFromName(payload.Loc);
+            if (loc == null) return;
+            var tile = new Vector2(payload.TileX, payload.TileY);
+            try
+            {
+                var snap = System.Text.Json.JsonSerializer.Deserialize<ConsoleManager.SyncSnapshotPublic>(payload.Json);
+                if (snap == null) return;
+                var input = Manager.GetInputChestObj(loc, tile);
+                var output = Manager.GetOutputChestObj(loc, tile);
+                input.Items.Clear();
+                foreach (var s in snap.Fruit) input.Items.Add(Recreate(s));
+                output.Items.Clear();
+                foreach (var s in snap.Wine) output.Items.Add(Recreate(s));
+                var state = Manager.GetState(loc, tile);
+                state.InputPriority.Clear();
+                if (snap.Priority != null) state.InputPriority.AddRange(snap.Priority);
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[sc_sync] 应用主机状态失败: {ex.Message}", LogLevel.Error);
+            }
+        }
+
+        private static Item Recreate(ConsoleManager.SyncItemPublic s)
+        {
+            var item = ItemRegistry.Create(s.Id, s.Stack);
+            if (item == null) return new StardewValley.Object(s.Id, s.Stack);
+            item.Quality = s.Quality;
+            return item;
+        }
+
+        /// <summary>访客:把箱子操作转发主机。</summary>
+        public void ForwardGuestOp(GameLocation loc, Vector2 tile, string op, string itemId, int stack, int quality = 0, List<string>? priority = null)
+        {
+            if (Context.IsMainPlayer || Manager == null) return;
+            Helper.Multiplayer.SendMessage(
+                new GuestOpPayload
+                {
+                    Loc = loc.NameOrUniqueName,
+                    TileX = tile.X,
+                    TileY = tile.Y,
+                    Op = op,
+                    ItemId = itemId,
+                    Stack = stack,
+                    Quality = quality,
+                    Priority = priority
+                },
+                MsgGuestOp,
+                modIDs: new[] { ModManifest.UniqueID });
+        }
+
+        /// <summary>访客:打开菜单时请求主机状态。</summary>
+        public void RequestHostState(GameLocation loc, Vector2 tile)
+        {
+            if (Context.IsMainPlayer || Manager == null) return;
+            Helper.Multiplayer.SendMessage(
+                new GuestOpPayload { Loc = loc.NameOrUniqueName, TileX = tile.X, TileY = tile.Y, Op = "request_state" },
+                MsgGuestOp,
+                modIDs: new[] { ModManifest.UniqueID });
+        }
+
+        /// <summary>换地点时:主机把所在地点的所有电脑状态同步给新到的访客。</summary>
+        private void OnWarped(object? sender, StardewModdingAPI.Events.WarpedEventArgs e)
+        {
+            if (!Context.IsMainPlayer || Manager == null) return;
+            if (e.NewLocation == null || !Manager.HasConsole(e.NewLocation)) return;
+            foreach (var tile in Manager.GetConsoleTiles(e.NewLocation))
+                SendHostState(e.NewLocation, tile);
         }
 
         private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
         {
+            // 联机:存档数据在主机(SMAPI ReadSaveData 在客机会抛 "remote host" 异常)。
+            // 客机不读不写,内置箱内容走主机权威(见 ConsoleManager 的只读守卫)。
+            if (!Context.IsMainPlayer)
+            {
+                Manager!.RebuildCache();
+                return;
+            }
             Manager!.RebuildCache();
             Manager.LoadFromSave();
         }
 
         private void OnSaving(object? sender, SavingEventArgs e)
         {
+            if (!Context.IsMainPlayer) return;   // 联机:只有主机写存档
+            // 先确保所有电脑的内置箱内容落盘 modData(随大件序列化进存档,双保险)
+            if (Manager != null)
+            {
+                foreach (var loc in Game1.locations)
+                {
+                    if (!Manager.HasConsole(loc)) continue;
+                    foreach (var tile in Manager.GetConsoleTiles(loc))
+                        Manager.PersistToModData(loc, tile);
+                }
+            }
             Manager!.SaveToSave();
         }
 
@@ -61,6 +299,12 @@ namespace ShedConsoleComputer
         private void OnOneSecondUpdateTicked(object? sender, OneSecondUpdateTickedEventArgs e)
         {
             Manager!.RunAutomationForAll();
+        }
+
+        /// <summary>主线程每 tick：处理冻结期内标记的待处理机器（避开 passTimeForObjects 的 Lock）。</summary>
+        private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
+        {
+            Manager!.ProcessPendingMachines();
         }
 
         private void OnObjectListChanged(object? sender, ObjectListChangedEventArgs e)
