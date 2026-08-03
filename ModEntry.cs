@@ -270,8 +270,11 @@ namespace ShedConsoleComputer
                 Manager!.RebuildCache();
                 return;
             }
+            // 读档恢复:只走 modData(SyncKey)一条权威通道(RebuildCache 里 ApplyFromModData 恢复)。
+            // ⚠️ 不再调 LoadFromSave —— 它从 shed-console-data(List<Item> 抽象类,Newtonsoft
+            // 序列化不可靠,反序列化常返回空/丢)清空并覆盖 modData 刚恢复的内容 = "水果读档后消失"根因。
             Manager!.RebuildCache();
-            Manager.LoadFromSave();
+            Monitor.Log("[sc_sync] 读档:内置箱从电脑 modData 恢复(单一权威通道)。", LogLevel.Info);
         }
 
         private void OnSaving(object? sender, SavingEventArgs e)
