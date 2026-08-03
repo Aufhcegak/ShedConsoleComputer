@@ -56,6 +56,10 @@ namespace ShedConsoleComputer
             Tile = tile;
             State = state;
             BuildMainButtons();
+
+            // 联机：访客打开菜单时向主机请求最新内置箱状态（异步，稍后 ApplyHostState 刷新）
+            if (!Context.IsMainPlayer)
+                ModEntry.Instance?.RequestHostState(loc, tile);
         }
 
         private void BuildMainButtons()
@@ -120,6 +124,7 @@ namespace ShedConsoleComputer
                             if (!State.InputPriority.Contains(icon.Qid))
                                 State.InputPriority.Add(icon.Qid);
                             BuildPriorityIcons();
+                            ForwardPriority();
                             return;
                         }
                     }
@@ -130,6 +135,7 @@ namespace ShedConsoleComputer
                             Game1.playSound("bigDeSelect");
                             State.InputPriority.Remove(icon.Qid);
                             BuildPriorityIcons();
+                            ForwardPriority();
                             return;
                         }
                     }
@@ -158,7 +164,8 @@ namespace ShedConsoleComputer
         /// 不再嵌套子菜单——嵌套会导致空箱时鼠标消失、绘制错乱。
         /// 关键：ItemGrabMenu 的存取回调必须用自定义闭包操作 36 格数组。
         /// 原版 Chest.grabItemFromInventory/grabItemFromChest 内部会调 ShowMenu() 重建菜单，
-        /// 导致数组和 exitFunction 失效（放东西后关箱子，物品凭空消失/界面错乱）。</summary>
+        /// 导致数组和 exitFunction 失效（放东西后关箱子，物品凭空消失/界面错乱）。
+        /// 联机：访客的放入/取走操作通过 ModEntry 转发主机（主机改权威箱 + 落盘 modData 同步）。</summary>
         private void OpenChestPage(bool isFruit)
         {
             Chest chest = isFruit ? Manager.GetInputChestObj(Location, Tile) : Manager.GetOutputChestObj(Location, Tile);
@@ -175,7 +182,13 @@ namespace ShedConsoleComputer
             {
                 int idx = fixedItems.IndexOf(item);
                 if (idx >= 0)
+                {
+                    int stack = item.Stack;
                     fixedItems[idx] = null;
+                    // 联机：访客取走 → 转发主机扣减
+                    if (!Context.IsMainPlayer)
+                        ModEntry.Instance?.ForwardGuestOp(Location, Tile, isFruit ? "take_fruit" : "take_wine", item.QualifiedItemId, stack);
+                }
             }
             // 放东西：先进数组；放不下的部分留在手上（ItemGrabMenu 行为与普通箱子一致）。
             // 注意：不能调 who.removeItemFromInventory——原版 InventoryMenu.leftClick 在
@@ -185,6 +198,9 @@ namespace ShedConsoleComputer
                 Item? leftover = ChestUiCore.PutIntoFixedSlots(fixedItems, item);
                 if (grabMenu != null)
                     grabMenu.heldItem = leftover;
+                // 联机：访客放入 → 转发主机（主机入箱 + 落盘同步）
+                if (!Context.IsMainPlayer && leftover == null && item != null)
+                    ModEntry.Instance?.ForwardGuestOp(Location, Tile, isFruit ? "put_fruit" : "put_wine", item.QualifiedItemId, item.Stack, item is StardewValley.Object o ? o.Quality : 0);
             }
 
             grabMenu = new ItemGrabMenu(
@@ -279,6 +295,13 @@ namespace ShedConsoleComputer
         }
 
         private Rectangle BackButtonRect() => new(xPositionOnScreen + 40, yPositionOnScreen + height - 110, 220, 64);
+
+        /// <summary>联机：访客改优先级 → 转发主机（主机落盘同步）。</summary>
+        private void ForwardPriority()
+        {
+            if (!Context.IsMainPlayer)
+                ModEntry.Instance?.ForwardGuestOp(Location, Tile, "set_priority", "", 0, 0, new List<string>(State.InputPriority));
+        }
 
         /*********
         ** 绘制
