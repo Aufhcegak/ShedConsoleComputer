@@ -168,6 +168,11 @@ namespace ShedConsoleComputer
         /// 联机：访客的放入/取走操作通过 ModEntry 转发主机（主机改权威箱 + 落盘 modData 同步）。</summary>
         private void OpenChestPage(bool isFruit)
         {
+            // 联机:访客打开箱子页前再请求一次主机状态(确保展开的 36 格是最新的,
+            // 主机状态晚到的话,展开的数组就是旧内容)
+            if (!Context.IsMainPlayer)
+                ModEntry.Instance?.RequestHostState(Location, Tile);
+
             Chest chest = isFruit ? Manager.GetInputChestObj(Location, Tile) : Manager.GetOutputChestObj(Location, Tile);
 
             // 展开成固定 36 格数组：空箱也显示完整 36 格；关箱子时压缩回紧凑列表。
