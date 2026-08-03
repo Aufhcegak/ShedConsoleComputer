@@ -193,6 +193,8 @@ namespace ShedConsoleComputer
                     // 联机：访客取走 → 转发主机扣减
                     if (!Context.IsMainPlayer)
                         ModEntry.Instance?.ForwardGuestOp(Location, Tile, isFruit ? "take_fruit" : "take_wine", item.QualifiedItemId, stack);
+                    else
+                        Manager.PersistToModData(Location, Tile);   // 主机:取走即落盘(权威存储)
                 }
             }
             // 放东西：先进数组；放不下的部分留在手上（ItemGrabMenu 行为与普通箱子一致）。
@@ -206,6 +208,8 @@ namespace ShedConsoleComputer
                 // 联机：访客放入 → 转发主机（主机入箱 + 落盘同步）
                 if (!Context.IsMainPlayer && leftover == null && item != null)
                     ModEntry.Instance?.ForwardGuestOp(Location, Tile, isFruit ? "put_fruit" : "put_wine", item.QualifiedItemId, item.Stack, item is StardewValley.Object o ? o.Quality : 0);
+                else if (Context.IsMainPlayer && leftover == null)
+                    Manager.PersistToModData(Location, Tile);   // 主机:放入即落盘(权威存储)
             }
 
             grabMenu = new ItemGrabMenu(
@@ -227,11 +231,14 @@ namespace ShedConsoleComputer
                 context: chest);
 
             // 关闭时：把 36 格数组压缩回紧凑列表存回 Chest，然后回到主界面。
+            // 主机:关箱即落盘 modData(内置箱权威存储,随存档持久化 + NetField 同步访客)
             grabMenu.exitFunction = (IClickableMenu.onExit)Delegate.Combine(
                 grabMenu.exitFunction,
                 (IClickableMenu.onExit)delegate
                 {
                     ChestUiCore.CompressBack(fixedItems, chest.Items);
+                    if (Context.IsMainPlayer)
+                        Manager.PersistToModData(Location, Tile);
                     Game1.activeClickableMenu = new ConsoleMenu(Helper, Manager, Location, Tile, State);
                 });
 
