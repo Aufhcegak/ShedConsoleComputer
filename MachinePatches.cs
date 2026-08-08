@@ -29,6 +29,10 @@ namespace ShedConsoleComputer
             if (!__instance.bigCraftable.Value || __instance is StardewValley.Objects.Chest)
                 return;
 
+            // 联机:只主机排队处理(访客的机器由主机同步状态,访客本地不跑自动化)
+            if (!Context.IsMainPlayer)
+                return;
+
             GameLocation? location = __instance.Location;
             if (location == null || !mod.Manager.HasConsole(location))
                 return;
@@ -54,6 +58,10 @@ namespace ShedConsoleComputer
                 return;
 
             if (!__instance.bigCraftable.Value || __instance is StardewValley.Objects.Chest)
+                return;
+
+            // 联机:只主机排队处理
+            if (!Context.IsMainPlayer)
                 return;
 
             GameLocation? location = __instance.Location;
@@ -95,6 +103,10 @@ namespace ShedConsoleComputer
                 return;
 
             if (!__instance.bigCraftable.Value || __instance is StardewValley.Objects.Chest)
+                return;
+
+            // 联机:只有主机记录手动收酒冷却(访客收酒由主机状态同步,冷却只对主机自动化有意义)
+            if (!Context.IsMainPlayer)
                 return;
 
             // 整堆被拿走（heldObject 清空）才算手动收走；

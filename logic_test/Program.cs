@@ -520,5 +520,157 @@ AutomationCore.CollectPutDelegate = (held, output) =>
     Check("restore: 成功后顺序正常", chest2.Count == 1 && chest2[0]!.Stack == 1);
 }
 
+// ============================================================
+// 第十四组：机器判定矩阵 —— IsMachine/IsConsole/CanMachineAccept 全组合
+// ============================================================
+{
+    // IsMachine：小桶恒是；木桶/罐头瓶由配置开关控制
+    SimMachine keg = new("12", MachineSpec.Keg());
+    SimMachine cask = new("163", MachineSpec.Cask());
+    SimMachine jar = new("15", MachineSpec.Keg());
+    SimMachine other = new("100");
+    Check("mat: 小桶恒算", AutomationCore.IsMachine(keg, config));
+    Check("mat: 木桶开算", AutomationCore.IsMachine(cask, config));
+    Check("mat: 罐头开算", AutomationCore.IsMachine(jar, config));
+    Check("mat: 其他不算", !AutomationCore.IsMachine(other, config));
+    Check("mat: 全关不算木桶", !AutomationCore.IsMachine(cask, new ModConfig { IncludeCasks = false, IncludePreservesJar = false }));
+    Check("mat: 全关不算罐头", !AutomationCore.IsMachine(jar, new ModConfig { IncludeCasks = false, IncludePreservesJar = false }));
+    Check("mat: 关木桶开罐头", AutomationCore.IsMachine(jar, new ModConfig { IncludeCasks = false, IncludePreservesJar = true }));
+
+    // IsConsole：识别电脑 ID、不误判机器
+    var consoleObj = new SimMachine(AutomationCore.ConsoleUnqualified);
+    Check("mat: 电脑识别", AutomationCore.IsConsole(consoleObj));
+    Check("mat: 小桶不是电脑", !AutomationCore.IsConsole(keg));
+    Check("mat: null 不是电脑", !AutomationCore.IsConsole(null));
+    Check("mat: null 不是机器", !AutomationCore.IsMachine(null, config));
+
+    // CanMachineAccept：罐头瓶严格限定水果/蔬菜（咖啡豆不适用，与规则匹配一致）
+    Check("mat: 罐头吃水果", AutomationCore.CanMachineAccept(jar, new SimItem("348", 1, -79)));
+    Check("mat: 罐头不吃咖啡豆", !AutomationCore.CanMachineAccept(jar, new SimItem("433", 5)));
+    Check("mat: 罐头不吃蜂蜜", !AutomationCore.CanMachineAccept(jar, new SimItem("340", 1, -81)));
+    // 小桶吃蜂蜜（酿蜂蜜酒）但不吃成品酒/饮品
+    Check("mat: 小桶吃蜂蜜", AutomationCore.CanMachineAccept(keg, new SimItem("340", 1, -81)));
+    Check("mat: 小桶不吃蛋黄酱", !AutomationCore.CanMachineAccept(keg, new SimItem("434", 1, -27)));
+    // 工具/非 Object → false
+    Check("mat: 工具不吃", !AutomationCore.CanMachineAccept(keg, new SimTool()));
+    Check("mat: null 物品不吃", !AutomationCore.CanMachineAccept(keg, null));
+    // 未知机器（fallthrough 分支）
+    Check("mat: 未知机器按负类别", AutomationCore.CanMachineAccept(other, new SimItem("348", 1, -79)));
+    Check("mat: 未知机器正类别不吃", !AutomationCore.CanMachineAccept(other, new SimItem("348", 1, 0)));
+}
+
+// ============================================================
+// 第十五组：优先级 —— 空优先级/全不匹配/多个匹配去重
+// ============================================================
+{
+    // 空优先级列表：与 null 相同 → 按箱内顺序投（第一项水果）
+    SimMachine keg = new("12", MachineSpec.Keg());
+    var chest = new Inventory { new SimItem("348", 1, -79), new SimItem("433", 5) };
+    Check("prio2: 空列表按箱内顺序", AutomationCore.TryFeedMachine(keg, chest, new ConsoleState(), who));
+    Check("prio2: 投了水果(第一项)", chest.Count == 1 && chest[0]!.QualifiedItemId == "(O)433");
+
+    // 优先级多目标匹配：命中同一物品只出现一次（不会重复投同一个）
+    SimMachine keg2 = new("12", MachineSpec.Keg());
+    var chest2 = new Inventory { new SimItem("348", 2, -79), new SimItem("433", 5) };
+    var st2 = new ConsoleState();
+    st2.InputPriority.AddRange(new[] { "(O)348", "(O)348", "(O)433" }); // 重复条目
+    Check("prio2: 重复优先级只投一次", AutomationCore.TryFeedMachine(keg2, chest2, st2, who));
+    CheckEq("prio2: 水果扣 1", chest2[0]!.Stack, 1);
+    Check("prio2: 豆未动", chest2.Count == 2 && chest2[1]!.Stack == 5);
+
+    // 优先级首项不可投（数量不足）→ 回退到下一项
+    SimMachine keg3 = new("12", MachineSpec.Keg());
+    var chest3 = new Inventory { new SimItem("433", 3), new SimItem("348", 1, -79) };
+    var st3 = new ConsoleState();
+    st3.InputPriority.Add("(O)433");
+    Check("prio2: 优先不可投回退", AutomationCore.TryFeedMachine(keg3, chest3, st3, who));
+    CheckEq("prio2: 回退投了水果", chest3[0]!.Stack, 3); // 豆没动(3)，水果被投走后列表压缩
+}
+
+// ============================================================
+// 第十六组：收成品 —— 未就绪边界 / 原版 addItemToThisInventoryList 语义
+// ============================================================
+{
+    // 产物堆叠、ready 但 MinutesUntilReady > 0 → 不收（倒计时未到）
+    SimMachine keg = new("12", MachineSpec.Keg());
+    keg.heldObject.Value = new SimItem("459", 10);
+    keg.readyForHarvest.Value = true;
+    keg.MinutesUntilReady = 1; // 还没到 0
+    var output = new Inventory();
+    Check("collect2: 倒计时未到不收", !AutomationCore.TryCollectFromMachine(keg, output));
+    Check("collect2: 机器保持就绪", keg.readyForHarvest.Value && keg.heldObject.Value != null);
+
+    // 原版 addItemToThisInventoryList 语义：output 同类近满(998) + 收 5 → 补满 999、机器清空。
+    // （原版会把 998+5 直接覆盖为 999 丢 4 个——物品丢失 bug；模拟器复刻该语义以对齐游戏内行为。）
+    SimMachine keg2 = new("12", MachineSpec.Keg());
+    keg2.heldObject.Value = new SimItem("459", 5);
+    keg2.readyForHarvest.Value = true;
+    keg2.MinutesUntilReady = 0;
+    var output2 = new Inventory { new SimItem("459", 998) };
+    Check("collect2: 近满堆叠覆盖为 999", AutomationCore.TryCollectFromMachine(keg2, output2));
+    CheckEq("collect2: 成果箱补满 999", output2[0]!.Stack, 999);
+    Check("collect2: 机器清空", keg2.heldObject.Value == null && !keg2.readyForHarvest.Value);
+
+    // 同类满堆叠(999) + 收 3：原版开新槽放下全部 → 机器清空、成果箱两格
+    SimMachine keg3 = new("12", MachineSpec.Keg());
+    keg3.heldObject.Value = new SimItem("459", 3);
+    keg3.readyForHarvest.Value = true;
+    keg3.MinutesUntilReady = 0;
+    var output3 = new Inventory { new SimItem("459", 999) };
+    Check("collect2: 满堆叠开新槽全收", AutomationCore.TryCollectFromMachine(keg3, output3));
+    Check("collect2: 新槽放了 3", output3.Count == 2 && output3[1]!.Stack == 3);
+    Check("collect2: 机器清空2", keg3.heldObject.Value == null);
+}
+
+// ============================================================
+// 第十七组：箱子 UI 数据桥 —— 部分堆叠溢出返回剩余、getOne null 防御
+// ============================================================
+{
+    // 同类堆叠到 999 上限：原版 addToStack 在满堆叠时返回全部（保持 999）——放箱子的
+    // PutIntoFixedSlots 遇到满堆叠会尝试新空位（getOne 副本），所以 3 个能放下不返回剩余。
+    var slots = ChestUiCore.ExpandToFixedSlots(new Inventory());
+    slots[0] = new SimItem("433", 999);
+    var extra = new SimItem("433", 3);
+    var leftover = ChestUiCore.PutIntoFixedSlots(slots, extra);
+    Check("ui2: 满堆叠放新格全放下", leftover == null);
+    CheckEq("ui2: 原格保持 999", slots[0]!.Stack, 999);
+    CheckEq("ui2: 新格 3 个", slots[1]!.Stack, 3);
+    Check("ui2: 放的是副本", !ReferenceEquals(slots[1], extra));
+
+    // getOne 抛异常的物品（mod 物品/损坏数据）：按放不下处理，不崩箱子 UI
+    var slots2 = ChestUiCore.ExpandToFixedSlots(new Inventory());
+    var broken = new SimBrokenOne("348", 2);
+    var leftover2 = ChestUiCore.PutIntoFixedSlots(slots2, broken);
+    Check("ui2: getOne 异常返回原物不崩", ReferenceEquals(leftover2, broken));
+    CheckEq("ui2: 箱子保持空", ChestUiCore.CountItems(slots2), 0);
+
+    // 堆叠优先级：先堆叠同类（即使后面有空位）
+    var slots3 = ChestUiCore.ExpandToFixedSlots(new Inventory());
+    slots3[0] = new SimItem("433", 5);
+    slots3[2] = new SimItem("433", 5);
+    slots3[5] = new SimItem("348", 1, -79);
+    Check("ui2: 堆叠到第一个同类", ChestUiCore.PutIntoFixedSlots(slots3, new SimItem("433", 2)) == null);
+    CheckEq("ui2: 格0 成 7", slots3[0]!.Stack, 7);
+    CheckEq("ui2: 格2 未动", slots3[2]!.Stack, 5);
+    CheckEq("ui2: 空位未占用", slots3[1], null);
+}
+
+// ============================================================
+// 第十八组：存档模型 —— 字段形状与默认值（真实序列化往返由无头 SMAPI
+// 集成测试覆盖：SMAPI 的 SaveDataToolkit 在无 SMAPI 环境加载不了）
+// ============================================================
+{
+    var sd = new SaveData();
+    Check("save: 空存档默认字典", sd.Consoles != null && sd.Consoles.Count == 0);
+
+    var cs = new ConsoleSave();
+    Check("save: 新电脑空列表", cs.FruitItems.Count == 0 && cs.WineItems.Count == 0 && cs.InputPriority.Count == 0);
+
+    var st = new ConsoleState();
+    st.InputPriority.Add("(O)433");
+    Check("save: 优先级可加", st.InputPriority.Count == 1);
+    Check("save: 状态默认空优先级", new ConsoleState().InputPriority.Count == 0);
+}
+
 Console.WriteLine($"\n总计: PASS={pass} FAIL={fails}");
 return fails == 0 ? 0 : 1;

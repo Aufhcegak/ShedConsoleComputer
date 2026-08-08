@@ -63,35 +63,43 @@ namespace ShedConsoleComputer
         {
             if (fixedItems == null || item == null)
                 return item;
-
-            // 先堆叠到同类
-            foreach (Item? slot in fixedItems)
+            try
             {
-                if (slot == null || slot.canStackWith(item))
+                // 先堆叠到同类
+                foreach (Item? slot in fixedItems)
                 {
-                    if (slot == null)
-                        break; // 遇到空位：先尝试堆叠后面的同类，最后再落空位
-                    int leftover = slot.addToStack(item);
-                    if (leftover == 0)
+                    if (slot == null || slot.canStackWith(item))
+                    {
+                        if (slot == null)
+                            break; // 遇到空位：先尝试堆叠后面的同类，最后再落空位
+                        int leftover = slot.addToStack(item);
+                        if (leftover == 0)
+                            return null;
+                        item.Stack = leftover;
+                        break;
+                    }
+                }
+
+                // 剩余放空位（放副本，保持实例唯一性）
+                int empty = fixedItems.IndexOf(null);
+                if (empty >= 0)
+                {
+                    Item? copy = item.getOne();
+                    if (copy != null)
+                    {
+                        copy.Stack = item.Stack;
+                        fixedItems[empty] = copy;
                         return null;
-                    item.Stack = leftover;
-                    break;
+                    }
                 }
+                return item;
             }
-
-            // 剩余放空位（放副本，保持实例唯一性）
-            int empty = fixedItems.IndexOf(null);
-            if (empty >= 0)
+            catch (Exception)
             {
-                Item? copy = item.getOne();
-                if (copy != null)
-                {
-                    copy.Stack = item.Stack;
-                    fixedItems[empty] = copy;
-                    return null;
-                }
+                // 损坏物品（getOne/addToStack 抛异常——mod 物品可能实现异常）：
+                // 按放不下处理，绝不能把箱子 UI 拖垮。
+                return item;
             }
-            return item;
         }
 
         /// <summary>统计：数组里还有几个物品（调试/测试用）。</summary>

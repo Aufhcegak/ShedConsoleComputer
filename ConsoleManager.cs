@@ -47,6 +47,11 @@ namespace ShedConsoleComputer
         /// <summary>本次秒级扫描是否有机器进入了待收状态（用于驱动红点亮灯）。</summary>
         private bool sawReadyThisTick;
 
+        /// <summary>联机:访客操作转发主机(ModEntry 接线);主机侧应用访客操作。</summary>
+        public Action<string, string, string, int>? GuestForwardHook;
+        /// <summary>联机:访客收到主机状态后的应用(刷新内置箱缓存)。</summary>
+        public Action<string>? ApplyHook;
+
         public ConsoleManager(IModHelper helper, IMonitor monitor, ModConfig config)
         {
             Helper = helper;
@@ -108,7 +113,12 @@ namespace ShedConsoleComputer
                 foreach (KeyValuePair<Vector2, Object> pair in loc.Objects.Pairs)
                 {
                     if (IsConsole(pair.Value))
+                    {
                         AddToCache(loc, pair.Key);
+                        // 读档恢复:从电脑大件 modData 读回内置箱内容(modData 随存档持久化,
+                        // 是内置箱的权威存储)。旧版 "{}" 空快照 → 防御性当空列表处理。
+                        ApplyFromModData(loc, pair.Key);
+                    }
                 }
                 return true;
             });
@@ -167,6 +177,151 @@ namespace ShedConsoleComputer
             return chests;
         }
 
+        /*********
+        ** 联机:内置箱同步(2026-08-03 新增)
+        ** 问题:内置箱是每端独立内存。访客放杨桃 → 只在访客内存 → 主机保存时空箱 → 第二天消失。
+        ** 方案:主机为权威,把两个箱的内容 JSON 序列化进电脑大件 Object.modData
+        ** (Item.modData 是 NetField,反编译 Item.cs:354 确认 —— 主机写入自动同步到所有访客,
+        ** 且随存档序列化)。访客操作箱子 → 转发主机 → 主机改内存箱 + 写 modData → 同步回来。
+        *********/
+
+        /// <summary>modData key(存两个箱子的 JSON)。</summary>
+        private const string SyncKey = "xiepe.ShedConsole.Sync";
+
+        /// <summary>箱子快照的 JSON 序列化配置。
+        /// ⚠️ 关键:System.Text.Json 默认只序列化属性不序列化字段 —— SyncSnapshot 若用字段,
+        /// 序列化输出永远是 "{}",存档后水果全丢(实测根因!)。必须 IncludeFields 或改属性。</summary>
+        private static readonly System.Text.Json.JsonSerializerOptions SnapJson = new()
+        {
+            IncludeFields = true
+        };
+
+        /// <summary>物品的轻量序列化(只够还原:ID/堆叠/星级/名称)。</summary>
+        private class SyncItem
+        {
+            public string Id = "";      // QualifiedItemId
+            public int Stack;
+            public int Quality;
+            public string Name = "";
+        }
+
+        /// <summary>箱子快照。</summary>
+        private class SyncSnapshot
+        {
+            public List<SyncItem> Fruit = new();
+            public List<SyncItem> Wine = new();
+            public List<string> Priority = new();
+        }
+
+        /// <summary>主机:把当前内置箱内容写进电脑大件 modData(NetField 同步访客 + 随存档保存)。
+        /// 每次箱子内容变化后调用。找不到电脑大件则跳过(无副作用)。</summary>
+        public void PersistToModData(GameLocation loc, Vector2 tile)
+        {
+            if (!Context.IsMainPlayer || loc == null) return;
+            if (!loc.objects.TryGetValue(tile, out Object? consoleObj) || !IsConsole(consoleObj))
+                return;
+            var chests = GetInternal(loc, tile);
+            var snap = new SyncSnapshot
+            {
+                Fruit = chests.fruit.Items.Where(i => i != null).Select(ToSyncItem).ToList(),
+                Wine = chests.wine.Items.Where(i => i != null).Select(ToSyncItem).ToList(),
+            };
+            if (States.TryGetValue(StateKey(loc, tile), out var state))
+                snap.Priority = state.InputPriority;
+            consoleObj.modData[SyncKey] = System.Text.Json.JsonSerializer.Serialize(snap, SnapJson);
+        }
+
+        /// <summary>从电脑大件 modData 读回箱子内容(访客侧应用主机同步来的状态)。
+        /// modData 里没有(未初始化/新电脑)→ 保持当前内存箱(空)。</summary>
+        public void ApplyFromModData(GameLocation loc, Vector2 tile)
+        {
+            if (loc == null || !loc.objects.TryGetValue(tile, out Object? consoleObj) || !IsConsole(consoleObj))
+                return;
+            if (!consoleObj.modData.TryGetValue(SyncKey, out var json))
+                return;
+            SyncSnapshot? snap;
+            try { snap = System.Text.Json.JsonSerializer.Deserialize<SyncSnapshot>(json, SnapJson); }
+            catch { return; }
+            if (snap == null) return;
+
+            var chests = GetInternal(loc, tile);
+            // 防御:JSON 里字段为 null(旧版本 "{}" 存档)→ 当空列表处理,绝不抛异常/丢已加载内容
+            chests.fruit.Items.Clear();
+            if (snap.Fruit != null)
+            {
+                foreach (var s in snap.Fruit)
+                {
+                    var item = ItemRegistry.Create(s.Id, s.Stack);
+                    if (item == null) continue;
+                    item.Quality = s.Quality;
+                    if (item.Name != s.Name && !string.IsNullOrEmpty(s.Name)) item.Name = s.Name;
+                    chests.fruit.Items.Add(item);
+                }
+            }
+            chests.wine.Items.Clear();
+            if (snap.Wine != null)
+            {
+                foreach (var s in snap.Wine)
+                {
+                    var item = ItemRegistry.Create(s.Id, s.Stack);
+                    if (item == null) continue;
+                    item.Quality = s.Quality;
+                    if (item.Name != s.Name && !string.IsNullOrEmpty(s.Name)) item.Name = s.Name;
+                    chests.wine.Items.Add(item);
+                }
+            }
+            var state = GetState(loc, tile);
+            state.InputPriority.Clear();
+            if (snap.Priority != null)
+                state.InputPriority.AddRange(snap.Priority);
+        }
+
+        private static SyncItem ToSyncItem(Item i)
+        {
+            return new SyncItem
+            {
+                Id = i.QualifiedItemId,
+                Stack = i.Stack,
+                Quality = i is Object o ? o.Quality : 0,
+                Name = i.Name ?? ""
+            };
+        }
+
+        /// <summary>给 ModEntry 联机层用的公共快照(JSON 可序列化)。</summary>
+        public class SyncItemPublic
+        {
+            public string Id = "";
+            public int Stack;
+            public int Quality;
+        }
+
+        public class SyncSnapshotPublic
+        {
+            public List<SyncItemPublic> Fruit = new();
+            public List<SyncItemPublic> Wine = new();
+            public List<string> Priority = new();
+
+            public SyncSnapshotPublic() { }
+            public SyncSnapshotPublic(Chest fruit, Chest wine, List<string> priority)
+            {
+                Fruit = fruit.Items.Where(i => i != null).Select(i => new SyncItemPublic
+                {
+                    Id = i.QualifiedItemId, Stack = i.Stack, Quality = i is Object o ? o.Quality : 0
+                }).ToList();
+                Wine = wine.Items.Where(i => i != null).Select(i => new SyncItemPublic
+                {
+                    Id = i.QualifiedItemId, Stack = i.Stack, Quality = i is Object o ? o.Quality : 0
+                }).ToList();
+                Priority = priority;
+            }
+        }
+
+        /// <summary>某地点所有电脑的格位(联机同步用)。</summary>
+        public List<Vector2> GetConsoleTiles(GameLocation loc)
+        {
+            return ConsoleCache.TryGetValue(loc, out var tiles) ? tiles : new List<Vector2>();
+        }
+
         /// <summary>投料箱实际用的物品表。现在箱子是原生 ItemGrabMenu 直接打开，关闭时立即写回 Chest，所以直接读 Chest 即可。</summary>
         private IList<Item> GetEffectiveInputItems(GameLocation loc, Vector2 tile)
         {
@@ -182,6 +337,10 @@ namespace ShedConsoleComputer
             InternalChests.Clear();
             States.Clear();
             ManualCollectBackoffUntil.Clear();
+
+            // 联机:客机不读存档数据(在主机)。客机的内置箱为空,内容由主机权威。
+            if (!Context.IsMainPlayer)
+                return;
 
             SaveData data = Helper.Data.ReadSaveData<SaveData>("shed-console-data") ?? new SaveData();
             foreach (KeyValuePair<string, ConsoleSave> pair in data.Consoles)
@@ -211,6 +370,9 @@ namespace ShedConsoleComputer
 
         public void SaveToSave()
         {
+            // 联机:只有主机写存档数据(客机 WriteSaveData 抛 "remote host" 异常)
+            if (!Context.IsMainPlayer)
+                return;
             SaveData data = new();
             foreach (KeyValuePair<string, (Chest, Chest)> pair in InternalChests)
             {
@@ -288,7 +450,8 @@ namespace ShedConsoleComputer
                 && machine.heldObject.Value != null
                 && machine.MinutesUntilReady <= 0)
             {
-                AutomationCore.TryCollectFromMachine(machine, output);
+                if (AutomationCore.TryCollectFromMachine(machine, output))
+                    PersistToModData(loc, tile);   // 联机:主机自动化改了成果箱 → 落盘 modData 同步访客
             }
 
             if (Config.AutoFeed
@@ -296,7 +459,8 @@ namespace ShedConsoleComputer
                 && !machine.readyForHarvest.Value
                 && !IsInManualCollectBackoff(loc, machine))
             {
-                AutomationCore.TryFeedMachine(machine, input, state, Game1.player);
+                if (AutomationCore.TryFeedMachine(machine, input, state, Game1.player))
+                    PersistToModData(loc, tile);   // 联机:主机自动化投了料 → 落盘 modData 同步访客
             }
 
             if (machine.readyForHarvest.Value && machine.heldObject.Value != null
@@ -347,6 +511,7 @@ namespace ShedConsoleComputer
             Inventory output = outputChest.Items;
 
             bool locationHasReady = false;
+            bool chestChanged = false;
 
             foreach (KeyValuePair<Vector2, Object> pair in loc.Objects.Pairs.ToList())
             {
@@ -358,7 +523,10 @@ namespace ShedConsoleComputer
                 {
                     locationHasReady = true;
                     if (Config.AutoCollect && AutomationCore.TryCollectFromMachine(machine, output))
+                    {
                         collected++;
+                        chestChanged = true;
+                    }
                 }
 
                 if (Config.AutoFeed
@@ -368,8 +536,13 @@ namespace ShedConsoleComputer
                     && AutomationCore.TryFeedMachine(machine, input, state, Game1.player))
                 {
                     loaded++;
+                    chestChanged = true;
                 }
             }
+
+            // 联机:主机自动化改了内置箱 → 落盘 modData(NetField 同步给访客)
+            if (chestChanged)
+                PersistToModData(loc, tile);
 
             if (locationHasReady)
                 sawReadyThisTick = true;
